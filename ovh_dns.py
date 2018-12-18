@@ -100,8 +100,8 @@ def get_domain_records(client, domain):
     record_ids = client.get('/domain/zone/{}/record'.format(domain))
     for record_id in record_ids:
         info = client.get('/domain/zone/{}/record/{}'.format(domain, record_id))
-        # TODO: Cannot aggregate based only on name, must use record type and target as well
-        records[info['subDomain']] = info
+        record = "{} {} {}".format(info['subDomain'], info['fieldType'], info['zone'])
+        records[record] = info
 
     return records
 
@@ -110,10 +110,10 @@ def main():
     module = AnsibleModule(
         argument_spec = dict(
             domain = dict(required=True),
-            name = dict(required=True),
+            name = dict(default=''),
             value = dict(default=''),
             type = dict(default='A', choices=['A', 'AAAA', 'CNAME', 'DKIM', 'LOC', 'MX', 'NAPTR', 'NS', 'PTR', 'SPF', 'SRV', 'SSHFP', 'TXT']),
-            state = dict(default='present', choices=['present', 'absent']),
+            state = dict(default='present', choices=['present', 'absent', 'refresh']),
         ),
         supports_check_mode = True
     )
@@ -130,52 +130,59 @@ def main():
     domains = client.get('/domain/zone')
     if not domain in domains:
         module.fail_json(msg='Domain {} does not exist'.format(domain))
-
+    
+    # Refresh record
+    if state == 'refresh':
+        if not module.check_mode:
+            client.post('/domain/zone/{}/refresh'.format(domain))
+        module.exit_json(changed=True)
+        
     # Obtain all domain records to check status against what is demanded
     records = get_domain_records(client, domain)
-
+    
+    if name == '':
+        module.fail_json(msg='Did not specify a name')
+        
+    fieldtype = module.params.get('type')
+    targetval = module.params.get('value')
+    
+    if targetval == '':
+        module.fail_json(msg='Did not specify a value')
+    record = "{} {} {}".format(name, fieldtype, targetval)
+    
     # Remove a record
     if state == 'absent':
         # Are we done yet?
         #if name not in records or records[name]['fieldType'] != fieldtype or records[name]['target'] != targetval:
-        if name not in records:
+        if record not in records:
             module.exit_json(changed=False)
 
         if not module.check_mode:
             # Remove the record
             # TODO: Must check parameters
-            client.delete('/domain/zone/{}/record/{}'.format(domain, records[name]['id']))
-            client.post('/domain/zone/{}/refresh'.format(domain))
+            client.delete('/domain/zone/{}/record/{}'.format(domain, records[record]['id']))
         module.exit_json(changed=True)
-
+       
     # Add / modify a record
     if state == 'present':
-        fieldtype = module.params.get('type')
-        targetval = module.params.get('value')
 
         # Since we are inserting a record, we need a target
-        if targetval == '':
-            module.fail_json(msg='Did not specify a value')
 
         # Does the record exist already?
-        if name in records:
-            if records[name]['fieldType'] == fieldtype and records[name]['target'] == targetval:
+        if record in records:
+            if records[record]['fieldType'] == fieldtype and records[record]['target'] == targetval:
                 # The record is already as requested, no need to change anything
                 module.exit_json(changed=False)
 
             # Delete and re-create the record
             if not module.check_mode:
-                client.delete('/domain/zone/{}/record/{}'.format(domain, records[name]['id']))
+                client.delete('/domain/zone/{}/record/{}'.format(domain, records[record]['id']))
                 client.post('/domain/zone/{}/record'.format(domain), fieldType=fieldtype, subDomain=name, target=targetval)
-
-                # Refresh the zone and exit
-                client.post('/domain/zone/{}/refresh'.format(domain))
             module.exit_json(changed=True)
 
         if not module.check_mode:
             # Add the record
             client.post('/domain/zone/{}/record'.format(domain), fieldType=fieldtype, subDomain=name, target=targetval)
-            client.post('/domain/zone/{}/refresh'.format(domain))
         module.exit_json(changed=True)
 
     # We should never reach here
